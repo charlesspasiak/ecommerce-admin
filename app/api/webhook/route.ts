@@ -1,54 +1,45 @@
-import Stripe from "stripe"
-import { headers } from "next/headers"
-import { NextResponse } from "next/server"
+// @ts-ignore
+import { Snap } from 'midtrans-client';
+import { NextResponse } from 'next/server';
 
-import { stripe } from "@/lib/stripe"
-import prismadb from "@/lib/prismadb"
+import prismadb from '@/lib/prismadb';
 
 export async function POST(req: Request) {
-  const body = await req.text()
-  const signature = headers().get("Stripe-Signature") as string
+  const notificationJson = await req.json();
 
-  let event: Stripe.Event
+  // Create Core API / Snap instance (both have shared `transactions` methods)
+  let apiClient = new Snap({
+    isProduction: false,
+    serverKey: process.env.MIDTRANS_SERVER_KEY,
+    clientKey: process.env.MIDTRANS_CLIENT_KEY,
+  });
 
-  try {
-    event = stripe.webhooks.constructEvent(
-      body,
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET!
-    )
-  } catch (error: any) {
-    return new NextResponse(`Webhook Error: ${error.message}`, { status: 400 })
-  }
+  const statusResponse = await apiClient.transaction.notification(notificationJson);
+  
+  const orderId = statusResponse.order_id;
+  const transactionStatus = statusResponse.transaction_status;
+  const fraudStatus = statusResponse.fraud_status;
 
-  const session = event.data.object as Stripe.Checkout.Session;
-  const address = session?.customer_details?.address;
-
-  const addressComponents = [
-    address?.line1,
-    address?.line2,
-    address?.city,
-    address?.state,
-    address?.postal_code,
-    address?.country
-  ];
-
-  const addressString = addressComponents.filter((c) => c !== null).join(', ');
-
-
-  if (event.type === "checkout.session.completed") {
+  if (transactionStatus == 'capture') {
+    // capture only applies to card transaction, which you need to check for the fraudStatus
+    if (fraudStatus == 'challenge') {
+      // TODO set transaction status on your databaase to 'challenge'
+    } else if (fraudStatus == 'accept') {
+      // TODO set transaction status on your databaase to 'success'
+    }
+  } else if (transactionStatus == 'settlement') {
     const order = await prismadb.order.update({
       where: {
-        id: session?.metadata?.orderId,
+        id: orderId,
       },
       data: {
         isPaid: true,
-        address: addressString,
-        phone: session?.customer_details?.phone || '',
+        address: 'Palembang',
+        phone: '08228069xxxx',
       },
       include: {
         orderItems: true,
-      }
+      },
     });
 
     const productIds = order.orderItems.map((orderItem) => orderItem.productId);
@@ -60,10 +51,17 @@ export async function POST(req: Request) {
         },
       },
       data: {
-        isArchived: true
-      }
+        isArchived: true,
+      },
     });
+  } else if (transactionStatus == 'deny') {
+    // TODO you can ignore 'deny', because most of the time it allows payment retries
+    // and later can become success
+  } else if (transactionStatus == 'cancel' || transactionStatus == 'expire') {
+    // TODO set transaction status on your databaase to 'failure'
+  } else if (transactionStatus == 'pending') {
+    // TODO set transaction status on your databaase to 'pending' / waiting payment
   }
 
   return new NextResponse(null, { status: 200 });
-};
+}
